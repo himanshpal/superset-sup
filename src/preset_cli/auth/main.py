@@ -2,7 +2,7 @@
 Mechanisms for authentication and authorization.
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Union
 
 from requests import Response, Session
 from requests.adapters import HTTPAdapter
@@ -14,8 +14,19 @@ class Auth:  # pylint: disable=too-few-public-methods
     An authentication/authorization mechanism.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        verify_ssl: bool = True,
+        ca_bundle: Optional[str] = None,
+    ):
         self.session = Session()
+        # SSL verification config:
+        # - verify_ssl=False  -> skip cert verification entirely (insecure)
+        # - ca_bundle=PATH    -> verify against the given CA bundle (recommended for
+        #                       internal CAs / self-hosted Superset behind a private CA)
+        # - default           -> verify against requests' bundled (certifi) CAs
+        self.verify: Union[bool, str] = False if not verify_ssl else (ca_bundle or True)
+        self.session.verify = self.verify
         self.session.hooks["response"].append(self.reauth)
 
         retries = Retry(
@@ -62,10 +73,13 @@ class Auth:  # pylint: disable=too-few-public-methods
 
         self.session.headers.update(self.get_headers())
         r.request.headers.update(self.get_headers())
-        
+
         try:
-            # Retry without triggering hooks again
-            retry_response = self.session.send(r.request, verify=False)
+            # Retry without triggering hooks again. Honour the session's verify
+            # setting rather than hardcoding verify=False (previous behaviour
+            # silently disabled TLS verification on every reauth, which is
+            # exactly what we don't want).
+            retry_response = self.session.send(r.request, verify=self.verify)
             return retry_response
         finally:
             # Restore the hooks
