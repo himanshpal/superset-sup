@@ -1,0 +1,11 @@
+[run]
+branch = true
+source = src/sup/commands
+
+[report]
+fail_under = 100
+show_missing = true
+include =
+    src/sup/commands/push_helper.py
+exclude_lines =
+    if __name__ == .__main__.

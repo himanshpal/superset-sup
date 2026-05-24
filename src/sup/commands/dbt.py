@@ -42,6 +42,76 @@ def format_dbt_help():
 app = typer.Typer(help=format_dbt_help(), rich_markup_mode="rich", no_args_is_help=True)
 
 
+def _resolve_manifest(file_path: str) -> Path:
+    """
+    Resolve a manifest.json path from either a direct path or a dbt_project.yml.
+
+    If file_path points to a dbt_project.yml, reads it to find target-path
+    and returns the resolved manifest.json path.
+    """
+    import yaml
+
+    path = Path(file_path)
+
+    if path.name == "dbt_project.yml":
+        if not path.exists():
+            return path  # Let caller handle the error
+
+        with open(path, encoding="utf-8") as f:
+            project = yaml.safe_load(f)
+
+        target_path = project.get("target-path", "target")
+        return path.parent / target_path / "manifest.json"
+
+    return path
+
+
+def _dry_run_preview(
+    manifest_path: str,
+    select: Optional[List[str]],
+    exclude: Optional[List[str]],
+    import_db: bool,
+    exposures_path: Optional[str],
+    porcelain: bool,
+) -> None:
+    """Preview what would be synced without making changes."""
+    import json
+
+    from preset_cli.cli.superset.sync.dbt.lib import apply_select
+    from preset_cli.cli.superset.sync.dbt.schemas import ModelSchema
+
+    with open(manifest_path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    model_schema = ModelSchema()
+    all_models = []
+    for node in data.get("nodes", {}).values():
+        if node.get("resource_type") == "model":
+            unique_id = node["unique_id"]
+            node["children"] = data.get("child_map", {}).get(unique_id, [])
+            all_models.append(model_schema.load(node))
+
+    selected = apply_select(all_models, tuple(select or []), tuple(exclude or []))
+
+    if porcelain:
+        for model in selected:
+            print(f"{model['name']}\t{model['schema']}\t{model['database']}")
+    else:
+        console.print(
+            f"{EMOJIS['info']} DRY RUN - {len(selected)} models would be synced:",
+            style=RICH_STYLES["info"],
+        )
+        for model in selected:
+            console.print(
+                f"  - {model['name']} ({model['schema']}.{model['database']})",
+                style=RICH_STYLES["dim"],
+            )
+        if import_db:
+            console.print("  Database connection would be imported")
+        if exposures_path:
+            console.print(f"  Exposures would be written to: {exposures_path}")
+
+
 @app.command("core")
 def sync_dbt_core(
     manifest_path: Annotated[
@@ -137,15 +207,18 @@ def sync_dbt_core(
     from sup.clients.superset import SupSupersetClient
     from sup.config.settings import SupContext
 
-    # Validate manifest exists
-    manifest = Path(manifest_path)
+    # Resolve manifest (supports dbt_project.yml)
+    manifest = _resolve_manifest(manifest_path)
     if not manifest.exists():
         if not porcelain:
             console.print(
-                f"{EMOJIS['error']} Manifest file not found: {manifest_path}",
+                f"{EMOJIS['error']} Manifest file not found: {manifest}",
                 style=RICH_STYLES["error"],
             )
         raise typer.Exit(1)
+
+    # Use resolved path for the rest of the command
+    manifest_path = str(manifest)
 
     if not porcelain:
         console.print(
@@ -165,12 +238,7 @@ def sync_dbt_core(
             console.print(f"📝 Will write exposures to: {exposures_path}")
 
     if dry_run:
-        if not porcelain:
-            console.print(
-                f"{EMOJIS['info']} DRY RUN - No changes will be made",
-                style=RICH_STYLES["info"],
-            )
-        # TODO: Implement dry run preview
+        _dry_run_preview(manifest_path, select, exclude, import_db, exposures_path, porcelain)
         return
 
     try:
@@ -408,12 +476,59 @@ def sync_dbt_cloud(
             console.print(f"📝 Will write exposures to: {exposures_path}")
 
     if dry_run:
-        if not porcelain:
+        masked_token = f"****{token[-4:]}" if len(token) >= 4 else "****"
+        if porcelain:
+            print(f"token:{masked_token}")
+            if account_id:
+                print(f"account_id:{account_id}")
+            if project_id:
+                print(f"project_id:{project_id}")
+            if job_id:
+                print(f"job_id:{job_id}")
+            if workspace_id:
+                print(f"workspace_id:{workspace_id}")
+            if select:
+                print(f"select:{','.join(select)}")
+            if exclude:
+                print(f"exclude:{','.join(exclude)}")
+            print(f"exposures:{exposures_path or 'no'}")
+            print(f"import_db:{'yes' if database_id or database_name else 'no'}")
+            print(f"disallow_edits:{'yes' if disallow_edits else 'no'}")
+            print(f"exposures_only:{'yes' if exposures_only else 'no'}")
+            print(f"preserve_metadata:{'yes' if preserve_metadata else 'no'}")
+            print(f"merge_metadata:{'yes' if merge_metadata else 'no'}")
+        else:
             console.print(
                 f"{EMOJIS['info']} DRY RUN - No changes will be made",
                 style=RICH_STYLES["info"],
             )
-        # TODO: Implement dry run preview
+            console.print()
+            console.print("[bold bright_white]Sync Configuration Summary[/bold bright_white]")
+            console.print(f"  Token: {masked_token}")
+            if account_id:
+                console.print(f"  Account ID: {account_id}")
+            if project_id:
+                console.print(f"  Project ID: {project_id}")
+            if job_id:
+                console.print(f"  Job ID: {job_id}")
+            if workspace_id:
+                console.print(f"  Target workspace: {workspace_id}")
+            if select:
+                console.print(f"  Select: {', '.join(select)}")
+            if exclude:
+                console.print(f"  Exclude: {', '.join(exclude)}")
+            if exposures_path:
+                console.print(f"  Exposures: {exposures_path}")
+            else:
+                console.print("  Exposures: not configured")
+            if database_id:
+                console.print(f"  Database ID: {database_id}")
+            if database_name:
+                console.print(f"  Database name: {database_name}")
+            console.print(f"  Disallow edits: {'yes' if disallow_edits else 'no'}")
+            console.print(f"  Exposures only: {'yes' if exposures_only else 'no'}")
+            console.print(f"  Preserve metadata: {'yes' if preserve_metadata else 'no'}")
+            console.print(f"  Merge metadata: {'yes' if merge_metadata else 'no'}")
         return
 
     try:

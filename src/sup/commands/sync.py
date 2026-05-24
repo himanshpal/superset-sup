@@ -14,6 +14,7 @@ import typer
 # Removed: from rich.console import Console
 from typing_extensions import Annotated
 
+from sup.commands.template_params import DisableJinjaOption, LoadEnvOption, TemplateOptions
 from sup.config.sync import SyncConfig, validate_sync_folder
 from sup.output.console import console
 from sup.output.styles import EMOJIS, RICH_STYLES
@@ -245,7 +246,7 @@ def create_sync(
         assets_folder.mkdir(exist_ok=True)
 
         # Create subdirectories for assets
-        for asset_type in ["charts", "dashboards", "datasets", "databases"]:
+        for asset_type in ["charts", "dashboards", "datasets", "databases", "themes"]:
             (assets_folder / asset_type).mkdir(exist_ok=True)
 
         # Save configuration
@@ -362,7 +363,7 @@ def display_sync_summary(
     # Asset selection summary
     assets = sync_config.source.assets
     asset_summary = []
-    for asset_type in ["charts", "dashboards", "datasets", "databases"]:
+    for asset_type in ["charts", "dashboards", "datasets", "databases", "themes"]:
         asset_config = getattr(assets, asset_type)
         if asset_config:
             summary = f"{asset_type}: {asset_config.selection}"
@@ -393,7 +394,7 @@ def execute_pull(sync_config: SyncConfig, sync_path: Path, dry_run: bool, porcel
         # Show what would be pulled for each asset type
         asset_summary = []
         assets = sync_config.source.assets
-        for asset_type in ["databases", "datasets", "charts", "dashboards"]:
+        for asset_type in ["databases", "datasets", "charts", "dashboards", "themes"]:
             asset_config = getattr(assets, asset_type)
             if asset_config:
                 summary = f"{asset_type}: {asset_config.selection}"
@@ -408,9 +409,12 @@ def execute_pull(sync_config: SyncConfig, sync_path: Path, dry_run: bool, porcel
         return
 
     # Import the export functionality from legacy CLI
+    from zipfile import ZipFile as _ZipFile
+
     from preset_cli.cli.superset.export import export_resource
     from sup.clients.superset import SupSupersetClient
     from sup.config.settings import SupContext
+    from sup.lib import remove_root, safe_extract_path
 
     try:
         # Get current context and client
@@ -429,7 +433,7 @@ def execute_pull(sync_config: SyncConfig, sync_path: Path, dry_run: bool, porcel
         assets = sync_config.source.assets
         total_files = 0
 
-        for asset_type in ["databases", "datasets", "charts", "dashboards"]:
+        for asset_type in ["databases", "datasets", "charts", "dashboards", "themes"]:
             asset_config = getattr(assets, asset_type)
             if not asset_config:
                 continue
@@ -457,17 +461,40 @@ def execute_pull(sync_config: SyncConfig, sync_path: Path, dry_run: bool, porcel
                     console.print(f"     No {asset_type} to pull")
                 continue
 
-            # Use the legacy export_resource function with overwrite=True
-            export_resource(
-                resource_name=asset_type.rstrip("s"),  # Remove plural: charts -> chart
-                requested_ids=requested_ids,
-                root=assets_path,
-                client=client.client,  # Use underlying SupersetClient
-                overwrite=True,  # Always overwrite in sync
-                disable_jinja_escaping=False,
-                skip_related=not asset_config.include_dependencies,
-                force_unix_eol=False,
-            )
+            if asset_type == "themes":
+                # Themes use export_zip directly (no legacy export_resource support)
+                zip_buffer = client.client.export_zip("theme", list(requested_ids))
+
+                resolved_base = assets_path.resolve()
+                with _ZipFile(zip_buffer) as bundle:
+                    for name in bundle.namelist():
+                        if name.endswith("/"):
+                            continue  # skip directory entries
+                        rel = remove_root(name)
+                        # Only extract theme YAML files — skip metadata.yaml and
+                        # any other bundle-level files to avoid collisions with
+                        # metadata written by other asset types in the same sync run.
+                        if not Path(rel).parts or Path(rel).parts[0] != "themes":
+                            continue
+                        target = safe_extract_path(resolved_base, rel)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        try:
+                            content = bundle.read(name).decode("utf-8")
+                        except UnicodeDecodeError as exc:
+                            raise ValueError(f"Non-UTF-8 content in theme export: {name}") from exc
+                        target.write_text(content, encoding="utf-8", newline="")
+            else:
+                # Use the legacy export_resource function with overwrite=True
+                export_resource(
+                    resource_name=asset_type.rstrip("s"),  # Remove plural: charts -> chart
+                    requested_ids=requested_ids,
+                    root=assets_path,
+                    client=client.client,  # Use underlying SupersetClient
+                    overwrite=True,  # Always overwrite in sync
+                    disable_jinja_escaping=False,
+                    skip_related=not asset_config.include_dependencies,
+                    force_unix_eol=False,
+                )
 
             total_files += len(requested_ids)
 
@@ -494,6 +521,7 @@ def execute_push(
     porcelain: bool,
 ) -> None:
     """Execute push operations to target workspaces."""
+    import logging
     from pathlib import Path as PathlibPath
 
     import yaml
@@ -508,6 +536,18 @@ def execute_push(
     )
     from sup.clients.superset import SupSupersetClient
     from sup.config.settings import SupContext
+
+    _logger = logging.getLogger(__name__)
+
+    # Warn if themes are configured — push doesn't support them yet
+    if sync_config.source.assets.themes:
+        msg = "Theme sync is pull-only for now; themes will be skipped during push."
+        _logger.warning(msg)
+        if not porcelain:
+            console.print(
+                f"{EMOJIS['warning']} {msg}",
+                style=RICH_STYLES["warning"],
+            )
 
     for target in targets:
         name_display = f" ({target.name})" if target.name else ""
@@ -562,6 +602,11 @@ def execute_push(
                 elif is_yaml_config(relative_path):
                     # Skip metadata.yaml and tags.yaml - they'll be generated by import_resources
                     if path_name.name in ("metadata.yaml", "tags.yaml"):
+                        continue
+
+                    # Skip theme files — push doesn't support themes yet
+                    # TODO(theme-push): remove when theme sync push is implemented
+                    if "themes" in relative_path.parts:
                         continue
 
                     # Render YAML with Jinja context
@@ -695,6 +740,256 @@ def execute_push(
                     style=RICH_STYLES["error"],
                 )
             raise
+
+
+@app.command("native")
+def sync_native(
+    directory: Annotated[
+        str,
+        typer.Argument(help="Directory containing asset YAML files"),
+    ],
+    workspace_id: Annotated[
+        Optional[int],
+        typer.Option(
+            "--workspace-id",
+            "-w",
+            help="Target workspace ID (defaults to configured target)",
+        ),
+    ] = None,
+    overwrite: Annotated[
+        bool,
+        typer.Option("--overwrite", help="Overwrite existing resources"),
+    ] = False,
+    template_options: TemplateOptions = None,
+    load_env: LoadEnvOption = False,
+    disable_jinja_templating: DisableJinjaOption = False,
+    continue_on_error: Annotated[
+        bool,
+        typer.Option(
+            "--continue-on-error",
+            "-c",
+            help="Continue pushing even if some assets fail",
+        ),
+    ] = False,
+    split: Annotated[
+        bool,
+        typer.Option(
+            "--split",
+            "-s",
+            help="Push assets individually instead of as a bundle",
+        ),
+    ] = False,
+    asset_type: Annotated[
+        Optional[str],
+        typer.Option(
+            "--asset-type",
+            help="Push only specific asset type (database, dataset, chart, dashboard)",
+        ),
+    ] = None,
+    db_password: Annotated[
+        Optional[List[str]],
+        typer.Option(
+            "--db-password",
+            help="Database password (uuid=password, repeatable)",
+        ),
+    ] = None,
+    disallow_edits: Annotated[
+        bool,
+        typer.Option(
+            "--disallow-edits",
+            help="Mark pushed assets as externally managed",
+        ),
+    ] = False,
+    external_url_prefix: Annotated[
+        str,
+        typer.Option(
+            "--external-url-prefix",
+            help="Base URL for external resources",
+        ),
+    ] = "",
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            "-f",
+            help="Skip confirmation prompts",
+        ),
+    ] = False,
+    porcelain: Annotated[
+        bool,
+        typer.Option("--porcelain", help="Machine-readable output"),
+    ] = False,
+):
+    """
+    Push assets from a directory of YAML files (native sync).
+
+    Full-featured push with Jinja2 templating support, equivalent to
+    the legacy `preset-cli superset sync native` / `import-assets` command.
+
+    Supports pushing databases, datasets, charts, and dashboards from
+    YAML files with optional Jinja2 template processing.
+
+    Examples:
+        sup sync native ./assets                           # Push all assets
+        sup sync native ./assets --overwrite               # Overwrite existing
+        sup sync native ./assets --asset-type chart        # Push only charts
+        sup sync native ./assets --split --continue-on-error  # Individual push
+        sup sync native ./assets --option env=prod         # With template vars
+        sup sync native ./assets --load-env                # With env vars
+    """
+    import click
+
+    from preset_cli.cli.superset.sync.native.command import ResourceType, native
+    from sup.auth.preset import SupPresetAuth
+    from sup.clients.preset import SupPresetClient
+    from sup.config.settings import SupContext
+
+    try:
+        # Verify directory exists
+        dir_path = Path(directory)
+        if not dir_path.exists():
+            console.print(
+                f"{EMOJIS['error']} Directory not found: {directory}",
+                style=RICH_STYLES["error"],
+            )
+            raise typer.Exit(1)
+        elif not dir_path.is_dir():
+            console.print(
+                f"{EMOJIS['error']} Path is not a directory: {directory}",
+                style=RICH_STYLES["error"],
+            )
+            raise typer.Exit(1)
+
+        # Resolve asset type enum if specified
+        resource_type = None
+        if asset_type:
+            type_map = {
+                "database": ResourceType.DATABASE,
+                "dataset": ResourceType.DATASET,
+                "chart": ResourceType.CHART,
+                "dashboard": ResourceType.DASHBOARD,
+            }
+            resource_type = type_map.get(asset_type.lower())
+            if resource_type is None:
+                console.print(
+                    f"{EMOJIS['error']} Invalid asset type: {asset_type}. "
+                    "Use: database, dataset, chart, dashboard",
+                    style=RICH_STYLES["error"],
+                )
+                raise typer.Exit(1)
+
+        ctx = SupContext()
+
+        # Get target workspace
+        target_workspace_id = ctx.get_target_workspace_id(cli_override=workspace_id)
+        if not target_workspace_id:
+            # Fall back to source workspace
+            target_workspace_id = ctx.get_workspace_id()
+
+        if not target_workspace_id:
+            console.print(
+                f"{EMOJIS['error']} No workspace configured",
+                style=RICH_STYLES["error"],
+            )
+            console.print(
+                "Run [bold]sup workspace use <ID>[/] or pass --workspace-id",
+                style=RICH_STYLES["info"],
+            )
+            raise typer.Exit(1)
+
+        # Safety confirmation
+        if not force and not porcelain:
+            console.print(
+                f"{EMOJIS['warning']} Push Operation",
+                style=RICH_STYLES["warning"],
+            )
+            console.print(f"Directory: [cyan]{directory}[/cyan]")
+            console.print(f"Target workspace: [cyan]{target_workspace_id}[/cyan]")
+            if asset_type:
+                console.print(f"Asset type: [cyan]{asset_type}[/cyan]")
+            if overwrite:
+                console.print("[bold yellow]Overwrite mode enabled[/bold yellow]")
+
+            if not typer.confirm("Continue with push?"):
+                console.print(
+                    f"{EMOJIS['info']} Push cancelled",
+                    style=RICH_STYLES["info"],
+                )
+                raise typer.Exit(0)
+
+        # Resolve target workspace URL
+        preset_client = SupPresetClient.from_context(ctx, silent=True)
+        workspaces = preset_client.get_all_workspaces(silent=True)
+
+        target_workspace = None
+        for ws in workspaces:
+            if ws.get("id") == target_workspace_id:
+                target_workspace = ws
+                break
+
+        if not target_workspace:
+            console.print(
+                f"{EMOJIS['error']} Workspace {target_workspace_id} not found",
+                style=RICH_STYLES["error"],
+            )
+            raise typer.Exit(1)
+
+        target_hostname = target_workspace.get("hostname")
+        if not target_hostname:
+            console.print(
+                f"{EMOJIS['error']} No hostname for workspace {target_workspace_id}",
+                style=RICH_STYLES["error"],
+            )
+            raise typer.Exit(1)
+
+        workspace_url = f"https://{target_hostname}/"
+        auth = SupPresetAuth.from_sup_config(ctx, silent=True)
+
+        if not porcelain:
+            console.print(
+                f"{EMOJIS['info']} Pushing assets from {directory}...",
+                style=RICH_STYLES["info"],
+            )
+
+        # Create mock Click context and invoke native()
+        push_command = click.Command("push")
+        mock_ctx = click.Context(push_command)
+        mock_ctx.obj = {
+            "AUTH": auth,
+            "INSTANCE": workspace_url,
+        }
+
+        with mock_ctx:
+            mock_ctx.invoke(
+                native,
+                directory=directory,
+                option=template_options or (),
+                asset_type=resource_type,
+                overwrite=overwrite,
+                disable_jinja_templating=disable_jinja_templating,
+                disallow_edits=disallow_edits,
+                external_url_prefix=external_url_prefix,
+                load_env=load_env,
+                split=split,
+                continue_on_error=continue_on_error,
+                db_password=tuple(db_password) if db_password else (),
+            )
+
+        if not porcelain:
+            console.print(
+                f"{EMOJIS['success']} Push completed successfully",
+                style=RICH_STYLES["success"],
+            )
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        if not porcelain:
+            console.print(
+                f"{EMOJIS['error']} Failed to push assets: {e}",
+                style=RICH_STYLES["error"],
+            )
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":
