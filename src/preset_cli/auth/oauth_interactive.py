@@ -129,6 +129,9 @@ class InteractiveOAuthAuth(Auth):
         scope: str = "openid profile email",
         redirect_port: int = 8080,
         token_type: str = "Bearer",
+        *,
+        verify_ssl: bool = True,
+        ca_bundle: Optional[str] = None,
     ):
         """
         Initialize interactive OAuth2 authentication.
@@ -143,7 +146,7 @@ class InteractiveOAuthAuth(Auth):
             redirect_port: Local port for callback (default: 8080)
             token_type: Token type for Authorization header (default: Bearer)
         """
-        super().__init__()
+        super().__init__(verify_ssl=verify_ssl, ca_bundle=ca_bundle)
 
         self.base_url = URL(base_url) if isinstance(base_url, str) else base_url
         self.authorization_url = (

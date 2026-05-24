@@ -5,6 +5,7 @@ sup - The Ultimate Superset CLI 🚀
 Main entry point for the sup command-line interface.
 """
 
+import os
 import typer
 from rich.theme import Theme
 from typing_extensions import Annotated
@@ -197,12 +198,41 @@ def main(
         bool,
         typer.Option("--version", "-v", help="Show version", callback=version_callback),
     ] = False,
+    no_verify_ssl: Annotated[
+        bool,
+        typer.Option(
+            "--no-verify-ssl",
+            help=(
+                "Disable TLS certificate verification for the Superset server. "
+                "Use only for trusted internal hosts. Prefer --ca-bundle for "
+                "internal CAs."
+            ),
+        ),
+    ] = False,
+    ca_bundle: Annotated[
+        str,
+        typer.Option(
+            "--ca-bundle",
+            help=(
+                "Path to a CA bundle (PEM) used to verify the Superset server's "
+                "TLS certificate. Use this for self-hosted Superset behind a "
+                "private CA. Overrides per-instance config."
+            ),
+        ),
+    ] = "",
 ):
     """
     🚀 The Ultimate Superset/Preset CLI 📊
 
     For power users and AI agents. Access data, manage assets, automate workflows.
     """
+    # Propagate SSL overrides to the auth factory via env vars so any
+    # downstream `create_superset_auth(config)` call respects them.
+    if no_verify_ssl:
+        os.environ["SUP_NO_VERIFY_SSL"] = "1"
+    if ca_bundle:
+        os.environ["SUP_CA_BUNDLE"] = ca_bundle
+
     if ctx.invoked_subcommand is None:
         show_banner()
         console.print(

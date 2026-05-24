@@ -62,6 +62,9 @@ class OAuthSupersetAuth(Auth):  # pylint: disable=too-few-public-methods
         password: Optional[str] = None,
         scope: str = "openid profile email roles",
         token_type: str = "Bearer",
+        *,
+        verify_ssl: bool = True,
+        ca_bundle: Optional[str] = None,
     ):
         """
         Initialize OAuth2 authentication for Superset.
@@ -84,7 +87,7 @@ class OAuthSupersetAuth(Auth):  # pylint: disable=too-few-public-methods
         Raises:
             requests.HTTPError: If initial token fetch fails
         """
-        super().__init__()
+        super().__init__(verify_ssl=verify_ssl, ca_bundle=ca_bundle)
 
         self.base_url = URL(base_url) if isinstance(base_url, str) else base_url
         self.token_url = URL(token_url) if isinstance(token_url, str) else token_url
