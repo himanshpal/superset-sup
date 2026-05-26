@@ -14,15 +14,8 @@ class SupersetJWTAuth(TokenAuth):  # pylint: disable=abstract-method
     Auth to Superset via JWT token.
     """
 
-    def __init__(
-        self,
-        token: str,
-        baseurl: URL,
-        *,
-        verify_ssl: bool = True,
-        ca_bundle: Optional[str] = None,
-    ):
-        super().__init__(token, verify_ssl=verify_ssl, ca_bundle=ca_bundle)
+    def __init__(self, token: str, baseurl: URL):
+        super().__init__(token)
         self.baseurl = baseurl
 
     def get_csrf_token(self, jwt: str) -> str:
@@ -52,16 +45,8 @@ class UsernamePasswordAuth(SupersetJWTAuth):  # pylint: disable=too-few-public-m
     then inherits JWT authentication behavior from SupersetJWTAuth.
     """
 
-    def __init__(
-        self,
-        baseurl: URL,
-        username: str,
-        password: Optional[str] = None,
-        *,
-        verify_ssl: bool = True,
-        ca_bundle: Optional[str] = None,
-    ):
-        super().__init__("", baseurl, verify_ssl=verify_ssl, ca_bundle=ca_bundle)
+    def __init__(self, baseurl: URL, username: str, password: Optional[str] = None):
+        super().__init__("", baseurl)
 
         self.baseurl = baseurl
         self.username = username

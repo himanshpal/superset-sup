@@ -6,8 +6,6 @@ based on configuration, handling validation and providing helpful
 error messages.
 """
 
-import os
-
 from typing import Union
 
 from yarl import URL
@@ -54,31 +52,20 @@ def create_superset_auth(
     """
     base_url = URL(config.url)
 
-    # Apply CLI flag overrides set by sup/main.py callback. These let
-    # `sup --no-verify-ssl ...` and `sup --ca-bundle PATH ...` override what's
-    # stored in the per-instance config without editing the YAML.
-    if os.environ.get("SUP_NO_VERIFY_SSL") == "1":
-        config = config.model_copy(update={"verify_ssl": False})
-    if os.environ.get("SUP_CA_BUNDLE"):
-        config = config.model_copy(
-            update={"ca_bundle": os.environ["SUP_CA_BUNDLE"]},
-        )
-
-
     if config.auth_method == "username_password":
         if not config.username or not config.password:
             raise ValueError(
                 "Username/password authentication requires both 'username' "
                 "and 'password' fields in configuration",
             )
-        return UsernamePasswordAuth(base_url, config.username, config.password, verify_ssl=config.verify_ssl, ca_bundle=config.ca_bundle)
+        return UsernamePasswordAuth(base_url, config.username, config.password)
 
     elif config.auth_method == "jwt":
         if not config.jwt_token:
             raise ValueError(
                 "JWT authentication requires 'jwt_token' field in configuration",
             )
-        return SupersetJWTAuth(config.jwt_token, base_url, verify_ssl=config.verify_ssl, ca_bundle=config.ca_bundle)
+        return SupersetJWTAuth(config.jwt_token, base_url)
 
     elif config.auth_method == "oauth":
         # Validate required OAuth2 fields
@@ -105,8 +92,6 @@ def create_superset_auth(
                     password=config.oauth_password,
                     scope=config.oauth_scope,
                     token_type=config.oauth_token_type,
-                    verify_ssl=config.verify_ssl,
-                    ca_bundle=config.ca_bundle,
                 )
             else:
                 # Use client credentials grant
@@ -119,8 +104,6 @@ def create_superset_auth(
                     password=None,
                     scope=config.oauth_scope,
                     token_type=config.oauth_token_type,
-                    verify_ssl=config.verify_ssl,
-                    ca_bundle=config.ca_bundle,
                 )
         
         # No client credentials provided - use interactive browser flow
@@ -139,8 +122,6 @@ def create_superset_auth(
             client_id=config.oauth_client_id or "superset-cli",
             scope=config.oauth_scope,
             token_type=config.oauth_token_type,
-            verify_ssl=config.verify_ssl,
-            ca_bundle=config.ca_bundle,
         )
 
     else:

@@ -104,19 +104,6 @@ class SupersetInstanceConfig(BaseModel):
         description="Authentication method: username_password, jwt, or oauth",
         pattern="^(username_password|jwt|oauth)$",
     )
-    # TLS / certificate configuration
-    verify_ssl: bool = Field(
-        default=True,
-        description="Verify the Superset server's TLS certificate (set False for "
-                    "self-signed certs / internal CAs that aren't in the system "
-                    "trust store)",
-    )
-    ca_bundle: Optional[str] = Field(
-        default=None,
-        description="Path to a custom CA bundle (PEM) used to verify the "
-                    "Superset server's certificate. Recommended over verify_ssl=False "
-                    "for internal CAs.",
-    )
 
     # Username/password authentication (basic Superset auth)
     username: Optional[str] = Field(
