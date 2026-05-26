@@ -97,16 +97,29 @@ def execute_sql_query(
 
     # Get context and resolve IDs
     ctx = SupContext()
-    final_workspace_id = ctx.get_workspace_id(workspace_id)
+    # Resolve the active Superset instance first. Precedence:
+    #   1. --instance flag (explicit per-invocation)
+    #   2. SUP_INSTANCE_NAME env var
+    #   3. project state / global config (set by `sup instance use [--persist]`)
+    # Only when no instance is configured do we require a Preset workspace.
+    final_instance = instance or ctx.get_instance_name()
+    final_workspace_id = (
+        None if final_instance else ctx.get_workspace_id(workspace_id)
+    )
     final_database_id = ctx.get_database_id(database_id)
 
-    if not final_workspace_id:
+    if not final_instance and not final_workspace_id:
         console.print(
-            f"{EMOJIS['error']} No workspace configured",
+            f"{EMOJIS['error']} No instance or workspace configured",
             style=RICH_STYLES["error"],
         )
         console.print(
-            "💡 Run [bold]sup workspace list[/] and [bold]sup workspace use <ID>[/]",
+            "💡 Self-hosted: [bold]sup sql --instance <NAME> \"...\"[/]  "
+            "or set the default with [bold]sup instance use <NAME> --persist[/]",
+            style=RICH_STYLES["info"],
+        )
+        console.print(
+            "💡 Preset:      [bold]sup workspace list[/] and [bold]sup workspace use <ID>[/]",
             style=RICH_STYLES["info"],
         )
         raise typer.Exit(1)
@@ -128,7 +141,9 @@ def execute_sql_query(
     with query_spinner(query, silent=porcelain) as sp:
         # Create Superset client and execute query
         client = SupSupersetClient.from_context(
-            ctx, workspace_id=final_workspace_id, instance_name=instance
+            ctx,
+            workspace_id=final_workspace_id,
+            instance_name=final_instance,
         )
 
         with QueryTimer() as timer:
